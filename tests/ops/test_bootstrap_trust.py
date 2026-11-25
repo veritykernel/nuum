@@ -117,6 +117,7 @@ elif name == "hcloud":
         print("4 10.0.0.4")
 elif name == "curl":
     entry["stdin"] = sys.stdin.read()
+    entry["token_in_env"] = "CF_API_TOKEN" in os.environ
     if "-X" not in args:
         print('{"result":[{"id":"record-1"}]}')
     else:
@@ -159,6 +160,7 @@ with open(os.environ["MOCK_LOG"], "a", encoding="utf-8") as out:
             self.assertIn("--header", call["args"])
             self.assertIn("@-", call["args"])
             self.assertEqual(call["stdin"], f"Authorization: Bearer {fixture_token}\n")
+            self.assertFalse(call["token_in_env"])
 
 
 if __name__ == "__main__":

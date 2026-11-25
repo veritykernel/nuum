@@ -18,6 +18,8 @@ if [[ ${#CF_API_TOKEN} -gt 4096 ]] ||
   echo "CF_API_TOKEN must be a single bounded header value" >&2
   exit 1
 fi
+# The shell function writes this token to curl stdin; curl does not need it in env.
+export -n CF_API_TOKEN
 
 SSH_USER="${SSH_USER:-monkey}"
 HOST_OP="${HOST_OP:-op}"
