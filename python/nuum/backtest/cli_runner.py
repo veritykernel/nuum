@@ -22,6 +22,11 @@ def parse_args(argv=None):
         help="Override artifacts base directory (default from scenario or ./artifacts)",
     )
     p.add_argument(
+        "--state-path",
+        default=None,
+        help="Explicitly authorize a local JSONL state file for this run",
+    )
+    p.add_argument(
         "--print-summary",
         action="store_true",
         help="Print summary JSON to stdout",
@@ -34,6 +39,9 @@ def main(argv=None):
     scenario = BacktestScenario.load(args.scenario)
     if args.artifacts_dir:
         scenario.artifacts_dir = args.artifacts_dir
+    if scenario.universe.lake1_state_path and not args.state_path:
+        raise ValueError("scenario requests a state file; pass --state-path explicitly")
+    scenario.universe.lake1_state_path = args.state_path
 
     engine = BacktestEngine(scenario)
     result = engine.run()
