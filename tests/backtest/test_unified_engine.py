@@ -1,39 +1,177 @@
-#!/usr/bin/env python3
+"""Behavior and adversarial limits for the isolated backtest demo."""
+
+import hashlib
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
-from pathlib import Path
+import tempfile
+import unittest
+from unittest import mock
+
+from nuum.backtest.artifacts import ArtifactWriter
+from nuum.backtest.engine import BacktestEngine
+from nuum.backtest.scenario import BacktestScenario, MAX_SCENARIO_BYTES
+import nuum.backtest.engine as engine_module
 
 
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[2]
+SAMPLE = ROOT / "config" / "backtest" / "sample_scenario_vol_world.json"
 
 
-def run_cli(args):
-    root = project_root()
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(root / "python") + os.pathsep + env.get("PYTHONPATH", "")
-    cmd = [sys.executable, "-m", "nuum.backtest.cli_runner"] + args
-    return subprocess.run(cmd, cwd=root, env=env, capture_output=True, text=True, check=True)
+def sample_data():
+    return json.loads(SAMPLE.read_text(encoding="utf-8"))
 
 
-def test_sample_scenario_runs(tmp_path):
-    root = project_root()
-    scenario = root / "config" / "backtest" / "sample_scenario_vol_world.json"
-    artifacts_dir = tmp_path / "artifacts"
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
+def run_cli(scenario: Path, artifacts_dir: Path, *extra: str):
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "python")}
+    return subprocess.run(
+        (sys.executable, "-m", "nuum.backtest.cli_runner", "--scenario", str(scenario),
+         "--artifacts-dir", str(artifacts_dir), *extra),
+        cwd=ROOT, env=env, capture_output=True, text=True,
+    )
 
-    result = run_cli(["--scenario", str(scenario), "--artifacts-dir", str(artifacts_dir), "--print-summary"])
-    assert "final_equity" in result.stdout
 
-    scenario_id = "sample_vol_world_studio1"
-    out_dir = artifacts_dir / scenario_id
-    assert (out_dir / "equity_curve.json").exists()
-    assert (out_dir / "trades.json").exists()
-    assert (out_dir / "summary.json").exists()
+class UnifiedEngineTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="nuum-backtest-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
 
-    with (out_dir / "summary.json").open("r", encoding="utf-8") as f:
-        summary = json.load(f)
-    assert summary["scenario_id"] == scenario_id
-    assert summary["num_points"] > 0
+    def write_scenario(self, data: dict) -> Path:
+        path = self.root / "scenario.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def test_sample_scenario_runs_without_overwriting_a_prior_run(self):
+        artifacts = self.root / "artifacts"
+        result = run_cli(SAMPLE, artifacts, "--print-summary")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("final_equity", result.stdout)
+        out_dir = artifacts / "sample_vol_world_studio1"
+        for name in ("equity_curve.json", "trades.json", "summary.json"):
+            self.assertTrue((out_dir / name).is_file())
+        summary = json.loads((out_dir / "summary.json").read_text())
+        self.assertEqual(summary["scenario_id"], "sample_vol_world_studio1")
+        self.assertGreater(summary["num_points"], 0)
+        digest = hashlib.sha256((out_dir / "summary.json").read_bytes()).hexdigest()
+        second = run_cli(SAMPLE, artifacts)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertEqual(hashlib.sha256((out_dir / "summary.json").read_bytes()).hexdigest(), digest)
+
+    def test_path_escape_and_symlink_target_are_rejected(self):
+        for bad_id in ("../outside", "/tmp/outside", "..", "a/b"):
+            data = sample_data()
+            data["scenario_id"] = bad_id
+            with self.subTest(bad_id=bad_id), self.assertRaises(ValueError):
+                BacktestScenario.from_dict(data)
+        data = sample_data()
+        for bad_root in ("/tmp/outside", "artifacts/../../outside"):
+            data["artifacts_dir"] = bad_root
+            with self.subTest(bad_root=bad_root), self.assertRaises(ValueError):
+                BacktestScenario.from_dict(data)
+
+        scenario = BacktestScenario.from_dict(sample_data())
+        result = BacktestEngine(scenario).run()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "summary.json").write_text("must remain")
+        artifact_root = self.root / "artifacts"
+        artifact_root.mkdir()
+        (artifact_root / scenario.scenario_id).symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(FileExistsError):
+            ArtifactWriter(str(artifact_root), trusted_override=True).write_all(scenario, result)
+        self.assertEqual((outside / "summary.json").read_text(), "must remain")
+
+    def test_scenario_artifact_root_rejects_intermediate_symlinks(self):
+        data = sample_data()
+        data["artifacts_dir"] = "artifacts/redirect"
+        scenario_path = self.write_scenario(data)
+        sandbox = self.root / "sandbox"
+        sandbox.mkdir()
+        artifacts = sandbox / "artifacts"
+        artifacts.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (artifacts / "redirect").symlink_to(outside, target_is_directory=True)
+        env = {**os.environ, "PYTHONPATH": str(ROOT / "python")}
+
+        def run_in_sandbox():
+            return subprocess.run(
+                (sys.executable, "-m", "nuum.backtest.cli_runner", "--scenario", str(scenario_path)),
+                cwd=sandbox, env=env, capture_output=True, text=True,
+            )
+
+        escaped = run_in_sandbox()
+        self.assertNotEqual(escaped.returncode, 0)
+        self.assertFalse((outside / data["scenario_id"]).exists())
+
+        (artifacts / "redirect").unlink()
+        artifacts.rmdir()
+        artifacts.symlink_to(outside, target_is_directory=True)
+        escaped_root = run_in_sandbox()
+        self.assertNotEqual(escaped_root.returncode, 0)
+        self.assertFalse((outside / "redirect" / data["scenario_id"]).exists())
+
+        artifacts.unlink()
+        artifacts.mkdir()
+        valid = run_in_sandbox()
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        self.assertTrue((artifacts / "redirect" / data["scenario_id"] / "summary.json").is_file())
+
+    def test_scenario_window_cardinality_and_size_limits(self):
+        data = sample_data()
+        data["end_ts"] = "2024-02-01T00:00:00Z"
+        with self.assertRaises(ValueError):
+            BacktestScenario.from_dict(data)
+        data = sample_data()
+        data["universe"]["symbols"] = [f"SYM{i}" for i in range(17)]
+        with self.assertRaises(ValueError):
+            BacktestScenario.from_dict(data)
+        data = sample_data()
+        data["strategies"] = data["strategies"] * 3
+        with self.assertRaises(ValueError):
+            BacktestScenario.from_dict(data)
+        path = self.root / "large.json"
+        path.write_bytes(b" " * (MAX_SCENARIO_BYTES + 1))
+        with self.assertRaises(ValueError):
+            BacktestScenario.load(str(path))
+
+    def test_synthetic_bar_and_trade_limits(self):
+        data = sample_data()
+        data["end_ts"] = "2024-01-08T00:00:00Z"
+        data["universe"]["symbols"] = [f"S{i}" for i in range(16)]
+        scenario = BacktestScenario.from_dict(data)
+        with self.assertRaisesRegex(ValueError, "bar limit"):
+            BacktestEngine(scenario).run()
+
+        scenario = BacktestScenario.from_dict(sample_data())
+        with mock.patch.object(engine_module, "MAX_TRADES", 1):
+            with self.assertRaisesRegex(ValueError, "trade limit"):
+                BacktestEngine(scenario).run()
+
+    def test_state_file_is_explicit_and_bounded(self):
+        data = sample_data()
+        state = self.root / "state.jsonl"
+        state.write_text('{"ts":"2024-01-01T00:00:00Z","symbol":"SPX","price":100}\n')
+        data["universe"]["lake1_state_path"] = str(state)
+        scenario_path = self.write_scenario(data)
+        rejected = run_cli(scenario_path, self.root / "out1")
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("--state-path", rejected.stderr)
+        accepted = run_cli(scenario_path, self.root / "out2", "--state-path", str(state))
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        summary = json.loads((self.root / "out2" / data["scenario_id"] / "summary.json").read_text())
+        self.assertEqual(summary["num_points"], 1)
+
+        oversized = self.root / "oversized.jsonl"
+        with oversized.open("wb") as output:
+            output.truncate(8 * 1024 * 1024 + 1)
+        too_large = run_cli(scenario_path, self.root / "out3", "--state-path", str(oversized))
+        self.assertNotEqual(too_large.returncode, 0)
+        self.assertIn("8 MiB", too_large.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

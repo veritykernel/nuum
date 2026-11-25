@@ -4,8 +4,10 @@ from datetime import datetime
 from typing import Dict, List, Any
 
 from .scenario import BacktestScenario
-from .data_adapter import Lake1DataAdapter, MarketBar
+from .data_adapter import Lake1DataAdapter, MarketBar, MAX_BARS
 from .strategies import build_strategy, BaseStrategy
+
+MAX_TRADES = 50_000
 
 
 @dataclass
@@ -38,12 +40,19 @@ class BacktestEngine:
         equity = 0.0
         peak_equity = 0.0
         max_drawdown = 0.0
+        trade_count = 0
 
         for bar in adapter.iter_bars():
+            if len(equity_curve) >= MAX_BARS:
+                raise ValueError("backtest exceeds bar limit")
             last_ts = bar.ts
             prices: Dict[str, float] = {bar.symbol: bar.price}
             for strat in self.strategies:
+                before = len(strat.trades)
                 strat.on_bar(bar)
+                trade_count += len(strat.trades) - before
+                if trade_count > MAX_TRADES:
+                    raise ValueError("backtest exceeds trade limit")
             equity = 0.0
             for strat in self.strategies:
                 equity += strat.mark_to_market(prices)
