@@ -81,8 +81,44 @@ class UnifiedEngineTest(unittest.TestCase):
         artifact_root.mkdir()
         (artifact_root / scenario.scenario_id).symlink_to(outside, target_is_directory=True)
         with self.assertRaises(FileExistsError):
-            ArtifactWriter(str(artifact_root)).write_all(scenario, result)
+            ArtifactWriter(str(artifact_root), trusted_override=True).write_all(scenario, result)
         self.assertEqual((outside / "summary.json").read_text(), "must remain")
+
+    def test_scenario_artifact_root_rejects_intermediate_symlinks(self):
+        data = sample_data()
+        data["artifacts_dir"] = "artifacts/redirect"
+        scenario_path = self.write_scenario(data)
+        sandbox = self.root / "sandbox"
+        sandbox.mkdir()
+        artifacts = sandbox / "artifacts"
+        artifacts.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (artifacts / "redirect").symlink_to(outside, target_is_directory=True)
+        env = {**os.environ, "PYTHONPATH": str(ROOT / "python")}
+
+        def run_in_sandbox():
+            return subprocess.run(
+                (sys.executable, "-m", "nuum.backtest.cli_runner", "--scenario", str(scenario_path)),
+                cwd=sandbox, env=env, capture_output=True, text=True,
+            )
+
+        escaped = run_in_sandbox()
+        self.assertNotEqual(escaped.returncode, 0)
+        self.assertFalse((outside / data["scenario_id"]).exists())
+
+        (artifacts / "redirect").unlink()
+        artifacts.rmdir()
+        artifacts.symlink_to(outside, target_is_directory=True)
+        escaped_root = run_in_sandbox()
+        self.assertNotEqual(escaped_root.returncode, 0)
+        self.assertFalse((outside / "redirect" / data["scenario_id"]).exists())
+
+        artifacts.unlink()
+        artifacts.mkdir()
+        valid = run_in_sandbox()
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        self.assertTrue((artifacts / "redirect" / data["scenario_id"] / "summary.json").is_file())
 
     def test_scenario_window_cardinality_and_size_limits(self):
         data = sample_data()

@@ -45,7 +45,7 @@ def main(argv=None):
 
     engine = BacktestEngine(scenario)
     result = engine.run()
-    writer = ArtifactWriter(scenario.artifacts_dir)
+    writer = ArtifactWriter(scenario.artifacts_dir, trusted_override=bool(args.artifacts_dir))
     paths = writer.write_all(scenario, result)
 
     if args.print_summary:
