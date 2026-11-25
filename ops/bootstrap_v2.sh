@@ -13,6 +13,11 @@ source <(nuum-secrets-env --sh)
 : "${CF_ZONE_ID:?missing}"
 : "${ORIGIN_CERT_PEM_B64:?missing}"
 : "${ORIGIN_CERT_KEY_B64:?missing}"
+if [[ ${#CF_API_TOKEN} -gt 4096 ]] ||
+   printf '%s' "$CF_API_TOKEN" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+  echo "CF_API_TOKEN must be a single bounded header value" >&2
+  exit 1
+fi
 
 SSH_USER="${SSH_USER:-monkey}"
 HOST_OP="${HOST_OP:-op}"
@@ -41,6 +46,11 @@ SSH_OPTS=(-o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$NUUM_KNOWN_HOSTS"
 log(){ echo -e "\033[1;36m$*\033[0m"; }
 err(){ echo -e "\033[1;31mERROR:\033[0m $*" >&2; }
 rsh(){ ssh "${SSH_OPTS[@]}" "${SSH_USER}@$1" "bash -Eeuo pipefail -s"; }
+cf_curl(){
+  printf 'Authorization: Bearer %s\n' "$CF_API_TOKEN" |
+    curl --silent --show-error --fail --header @- \
+      --header 'Content-Type: application/json' "$@"
+}
 
 export HCLOUD_TOKEN
 need(){ command -v "$1" >/dev/null 2>&1 || { err "Missing $1"; exit 1; }; }
@@ -57,6 +67,9 @@ log "Preflight SSH..."
 for H in "$HOST_OP" "$HOST_ORC" "$HOST_LAKE"; do
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${H}" 'hostname'
 done
+
+# Retire the legacy trusted=yes Caddy source on lake before any package update.
+rsh "$HOST_LAKE" < "$SCRIPT_DIR/install_caddy_signed.sh"
 
 # === Firewalls ===
 log "Configuring Hetzner firewalls..."
@@ -103,16 +116,15 @@ hcloud floating-ip assign "$FIP_ID" "$SID_ORC"
 
 log "exec.cntm.io -> $FIP_IP"
 CF_BODY=$(jq -nc --arg n "$EXEC_FQDN" --arg c "$FIP_IP" '{type:"A",name:$n,content:$c,ttl:300,proxied:false}')
-RID=$(curl -s -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$EXEC_FQDN" | jq -r '.result[0].id // empty')
+RID=$(cf_curl "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$EXEC_FQDN" | jq -r '.result[0].id // empty')
 if [[ -n "$RID" ]]; then
-  curl -s -X PUT -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$RID" --data "$CF_BODY" >/dev/null
+  cf_curl -X PUT "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$RID" --data "$CF_BODY" >/dev/null
 else
-  curl -s -X POST -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" --data "$CF_BODY" >/dev/null
+  cf_curl -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" --data "$CF_BODY" >/dev/null
 fi
 
 # === Relay TLS with Origin Cert + AOP ===
 log "Configuring Caddy on lake..."
-rsh "$HOST_LAKE" < "$SCRIPT_DIR/install_caddy_signed.sh"
 rsh "$HOST_LAKE" < "$SCRIPT_DIR/install_cloudflare_aop_ca.sh"
 TLS_BLOCK="
 printf '%s' \"$ORIGIN_CERT_PEM_B64\" | base64 -d | sudo tee /etc/ssl/nuum_origin.crt >/dev/null
@@ -168,7 +180,7 @@ Wants=network-online.target
 What=${SB_USER}@${SB_HOST}:/home/${SB_USER}
 Where=${SB_MOUNT_POINT}
 Type=fuse.sshfs
-Options=_netdev,users,allow_other,IdentityFile=/home/${SSH_USER}/.ssh/sbbox_ed25519,UserKnownHostsFile=${SB_KNOWN_HOSTS_REMOTE},StrictHostKeyChecking=yes
+Options=_netdev,IdentityFile=/home/${SSH_USER}/.ssh/sbbox_ed25519,UserKnownHostsFile=${SB_KNOWN_HOSTS_REMOTE},StrictHostKeyChecking=yes
 [Install]
 WantedBy=multi-user.target
 MNT'
