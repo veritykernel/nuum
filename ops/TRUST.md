@@ -1,0 +1,11 @@
+# Bootstrap trust preconditions
+
+`bootstrap_v2.sh` is a privileged Hetzner, Cloudflare, Caddy, and Storage Box operation. Source review and CI do not authorize replaying it on an installed host.
+
+Before any run, the host owner must provide an absolute `NUUM_KNOWN_HOSTS` file with independently verified SSH public keys for the configured `op`, `orc`, and `lake` aliases. The script requires those entries, uses that file alone, and rejects first-use trust. Obtain the fingerprints through the server issuer or an independent console channel; `ssh-keyscan` alone does not authenticate a host.
+
+The lake owner must separately install `/etc/ssh/nuum_storagebox_known_hosts` with the ED25519 key for `u490628.your-storagebox.de`. The bootstrap checks the host binding and the [Hetzner-published ED25519 fingerprint](https://docs.hetzner.com/storage/storage-box/general/) `SHA256:XqONwb1S0zuj5A1CDxpOSuD2hnAArV1A3wKY7Z3sdgM`, then writes an SSHFS unit with strict host-key checking. If `storagebox.mount` is active, the script holds before changing it; the storage owner must plan a controlled remount and compare mounted data before and after. The source does not assert that an installed mount has adopted these options.
+
+The Caddy installer disables and retains the old `trusted=yes` source as `caddy.list.disabled`. It accepts only the reviewed [Cloudsmith Caddy stable key](https://cloudsmith.io/~caddy/repos/stable/pub-keys/) with primary fingerprint `65760C51EDEA2017CEA2CA15155B6D79CA56EA34` and SHA256 `783dfee04b19e851a928cd87b34710213ebbe7628f98d9f34595ab83be578c00`, then uses a `signed-by` apt source. The Cloudflare installer accepts only the current [authenticated origin pull CA](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/global/) with SHA256 `c14fed0ce5210db0719fea11d1f10b33750dc17d609aeaf47c75e9eff0d7b843`. If either provider rotates bytes, update the trust anchor after issuer verification; do not disable the checks.
+
+`tests/ops/test_bootstrap_trust.py` verifies both public trust-anchor fixtures and tamper rejection offline, and checks that absent host keys hold before network calls. It does not test the installed Hetzner servers, Cloudflare zone, Caddy service, or Storage Box mount.

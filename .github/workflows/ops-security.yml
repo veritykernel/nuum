@@ -1,0 +1,14 @@
+name: Ops security
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  trust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y gnupg openssl
+      - run: bash -n ops/bootstrap_v2.sh ops/status.sh ops/install_caddy_signed.sh ops/install_cloudflare_aop_ca.sh
+      - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/ops -p 'test_*.py' -v

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 # === pass-only: load secrets ===
 if ! command -v nuum-secrets-env >/dev/null 2>&1; then
@@ -25,18 +26,36 @@ RELAY_BACKEND_PORT="8080"
 SB_USER="u490628"
 SB_HOST="u490628.your-storagebox.de"
 SB_MOUNT_POINT="/mnt/storagebox"
+SB_KNOWN_HOSTS_REMOTE="/etc/ssh/nuum_storagebox_known_hosts"
+
+# Host keys must come from the host issuer before any privileged script or secret is sent.
+NUUM_KNOWN_HOSTS="${NUUM_KNOWN_HOSTS:?set an out-of-band verified known_hosts file}"
+[[ "$NUUM_KNOWN_HOSTS" == /* && -s "$NUUM_KNOWN_HOSTS" ]] || {
+  echo "NUUM_KNOWN_HOSTS must be an existing nonempty absolute file" >&2
+  exit 1
+}
+SSH_OPTS=(-o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$NUUM_KNOWN_HOSTS"
+          -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no -o BatchMode=yes
+          -o ForwardAgent=no)
 
 log(){ echo -e "\033[1;36m$*\033[0m"; }
 err(){ echo -e "\033[1;31mERROR:\033[0m $*" >&2; }
-rsh(){ ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@$1" "bash -s"; }
+rsh(){ ssh "${SSH_OPTS[@]}" "${SSH_USER}@$1" "bash -Eeuo pipefail -s"; }
 
 export HCLOUD_TOKEN
 need(){ command -v "$1" >/dev/null 2>&1 || { err "Missing $1"; exit 1; }; }
-need ssh; need jq; need curl; need hcloud
+need ssh; need ssh-keygen; need jq; need curl; need hcloud
+
+for H in "$HOST_OP" "$HOST_ORC" "$HOST_LAKE"; do
+  ssh-keygen -F "$H" -f "$NUUM_KNOWN_HOSTS" >/dev/null || {
+    err "No verified host key for $H in NUUM_KNOWN_HOSTS"
+    exit 1
+  }
+done
 
 log "Preflight SSH..."
 for H in "$HOST_OP" "$HOST_ORC" "$HOST_LAKE"; do
-  ssh -o StrictHostKeyChecking=accept-new "${SSH_USER}@${H}" 'echo $(hostname) ok'
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${H}" 'hostname'
 done
 
 # === Firewalls ===
@@ -79,7 +98,7 @@ if [[ -z "$FIP_ID" ]]; then
   FIP_ID=$(hcloud floating-ip list -o columns=id,description | awk -v l="$FIP_LABEL" '$2==l{print $1}')
 fi
 FIP_IP=$(hcloud floating-ip describe "$FIP_ID" -o json | jq -r '.ip')
-SID_ORC=$(hcloud server list -o columns=id,ipv4 | awk -v ip="$(ssh $HOST_ORC hostname -I | awk "{print \$1}")" '$2==ip{print $1}')
+SID_ORC=$(hcloud server list -o columns=id,ipv4 | awk -v ip="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${HOST_ORC}" hostname -I | awk "{print \$1}")" '$2==ip{print $1}')
 hcloud floating-ip assign "$FIP_ID" "$SID_ORC"
 
 log "exec.cntm.io -> $FIP_IP"
@@ -93,15 +112,15 @@ fi
 
 # === Relay TLS with Origin Cert + AOP ===
 log "Configuring Caddy on lake..."
+rsh "$HOST_LAKE" < "$SCRIPT_DIR/install_caddy_signed.sh"
+rsh "$HOST_LAKE" < "$SCRIPT_DIR/install_cloudflare_aop_ca.sh"
 TLS_BLOCK="
 printf '%s' \"$ORIGIN_CERT_PEM_B64\" | base64 -d | sudo tee /etc/ssl/nuum_origin.crt >/dev/null
+sudo touch /etc/ssl/nuum_origin.key
+sudo chmod 0600 /etc/ssl/nuum_origin.key
 printf '%s' \"$ORIGIN_CERT_KEY_B64\" | base64 -d | sudo tee /etc/ssl/nuum_origin.key >/dev/null
 sudo chmod 0644 /etc/ssl/nuum_origin.crt
 sudo chmod 0600 /etc/ssl/nuum_origin.key
-sudo curl -fsSL https://developers.cloudflare.com/ssl/static/origin_pull_ca.pem -o /etc/ssl/cf_origin_pull_ca.pem
-sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https ca-certificates curl
-echo 'deb [trusted=yes] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main' | sudo tee /etc/apt/sources.list.d/caddy.list
-sudo apt-get update -y && sudo apt-get install -y caddy
 sudo bash -c 'cat >/etc/caddy/Caddyfile <<CFG
 ${RELAY_FQDN} {
   tls /etc/ssl/nuum_origin.crt /etc/ssl/nuum_origin.key {
@@ -120,7 +139,20 @@ echo "$TLS_BLOCK" | rsh "$HOST_LAKE"
 
 # === Storage Box setup ===
 SB_SETUP="
-sudo apt-get install -y sshfs
+if sudo systemctl is-active --quiet storagebox.mount; then
+  echo 'Active storagebox.mount requires controlled remount and data readback before changing trust' >&2
+  exit 1
+fi
+sudo apt-get install -y sshfs openssh-client
+sudo test -s ${SB_KNOWN_HOSTS_REMOTE} || { echo 'Storage Box host key is not pre-provisioned' >&2; exit 1; }
+sudo ssh-keygen -F ${SB_HOST} -f ${SB_KNOWN_HOSTS_REMOTE} >/dev/null || {
+  echo 'Storage Box host key is absent from verified known_hosts' >&2; exit 1;
+}
+SB_FINGERPRINT=\$(sudo ssh-keygen -F ${SB_HOST} -f ${SB_KNOWN_HOSTS_REMOTE} |
+  grep -v '^#' | ssh-keygen -lf - -E sha256 | awk '{print \$2}')
+[[ \"\$SB_FINGERPRINT\" == 'SHA256:XqONwb1S0zuj5A1CDxpOSuD2hnAArV1A3wKY7Z3sdgM' ]] || {
+  echo 'Storage Box key does not match Hetzner published ED25519 fingerprint' >&2; exit 1;
+}
 if [[ ! -f /home/${SSH_USER}/.ssh/sbbox_ed25519 ]]; then
   sudo -u ${SSH_USER} ssh-keygen -t ed25519 -N '' -f /home/${SSH_USER}/.ssh/sbbox_ed25519 -C nuum_storagebox
 fi
@@ -136,7 +168,7 @@ Wants=network-online.target
 What=${SB_USER}@${SB_HOST}:/home/${SB_USER}
 Where=${SB_MOUNT_POINT}
 Type=fuse.sshfs
-Options=_netdev,users,allow_other,IdentityFile=/home/${SSH_USER}/.ssh/sbbox_ed25519,StrictHostKeyChecking=no
+Options=_netdev,users,allow_other,IdentityFile=/home/${SSH_USER}/.ssh/sbbox_ed25519,UserKnownHostsFile=${SB_KNOWN_HOSTS_REMOTE},StrictHostKeyChecking=yes
 [Install]
 WantedBy=multi-user.target
 MNT'
