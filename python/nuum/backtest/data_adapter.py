@@ -38,7 +38,7 @@ class Lake1DataAdapter:
         self.state_path = state_path
 
     def _iter_from_file(self, path: Path) -> Generator[MarketBar, None, None]:
-        source_fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        source_fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
         with os.fdopen(source_fd, "rb") as source:
             size = os.fstat(source.fileno())
             if not stat.S_ISREG(size.st_mode) or size.st_size > MAX_STATE_BYTES:
