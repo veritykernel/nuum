@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from dataclasses import dataclass, asdict
 from datetime import datetime
+import math
 from typing import Dict, List, Any
 
 from .scenario import BacktestScenario
@@ -56,8 +57,12 @@ class BacktestEngine:
             equity = 0.0
             for strat in self.strategies:
                 equity += strat.mark_to_market(prices)
+                if not math.isfinite(equity):
+                    raise ValueError("backtest equity is not finite")
             peak_equity = max(peak_equity, equity)
             dd = 0.0 if peak_equity == 0 else (peak_equity - equity) / max(1e-9, peak_equity)
+            if not math.isfinite(dd):
+                raise ValueError("backtest drawdown is not finite")
             max_drawdown = max(max_drawdown, dd)
             equity_curve.append(
                 {

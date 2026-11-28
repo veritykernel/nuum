@@ -58,6 +58,12 @@ class ArtifactWriter:
 
     def write_all(self, scenario: BacktestScenario, result: BacktestResult) -> Dict[str, str]:
         scenario_id = safe_component(scenario.scenario_id, "scenario_id")
+        # Reject non-RFC JSON before creating a run directory or any partial artifact.
+        payloads = (
+            scenario.to_dict(), result.equity_curve, result.trades, result.summary,
+        )
+        for value in payloads:
+            json.dumps(value, allow_nan=False)
         base_fd, base = self._open_base()
         try:
             # Reject an existing directory or symlink rather than truncating a prior run.
@@ -72,7 +78,7 @@ class ArtifactWriter:
                                 0o600, dir_fd=out_fd),
                         "w", encoding="utf-8",
                     ) as output:
-                        json.dump(value, output, indent=2, sort_keys=True)
+                        json.dump(value, output, indent=2, sort_keys=True, allow_nan=False)
 
                 write_json("scenario.json", scenario.to_dict())
                 write_json("equity_curve.json", result.equity_curve)
@@ -90,7 +96,7 @@ class ArtifactWriter:
                     output.write(f"Universe: {scenario.universe.universe_id}\n")
                     output.write(f"Symbols: {', '.join(scenario.universe.symbols)}\n")
                     output.write(f"Strategies: {[s.strategy_id for s in scenario.strategies]}\n")
-                    output.write(f"Summary: {json.dumps(result.summary, sort_keys=True)}\n")
+                    output.write(f"Summary: {json.dumps(result.summary, sort_keys=True, allow_nan=False)}\n")
             finally:
                 os.close(out_fd)
         finally:

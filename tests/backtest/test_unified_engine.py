@@ -29,7 +29,7 @@ def run_cli(scenario: Path, artifacts_dir: Path, *extra: str):
     return subprocess.run(
         (sys.executable, "-m", "nuum.backtest.cli_runner", "--scenario", str(scenario),
          "--artifacts-dir", str(artifacts_dir), *extra),
-        cwd=ROOT, env=env, capture_output=True, text=True,
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=10,
     )
 
 
@@ -171,6 +171,55 @@ class UnifiedEngineTest(unittest.TestCase):
         too_large = run_cli(scenario_path, self.root / "out3", "--state-path", str(oversized))
         self.assertNotEqual(too_large.returncode, 0)
         self.assertIn("8 MiB", too_large.stderr)
+
+    def test_extreme_finite_inputs_cannot_emit_nonfinite_artifacts(self):
+        data = sample_data()
+        data["strategies"] = [{
+            "strategy_id": "vol_overflow", "kind": "vol",
+            "params": {"vol_target": 0.25, "vol_leverage": 1e308},
+        }]
+        state = self.root / "finite-state.jsonl"
+        state.write_text(
+            '{"ts":"2024-01-01T00:00:00Z","symbol":"SPX",'
+            '"price":100,"volume":1,"iv":1e308}\n', encoding="utf-8",
+        )
+        scenario_path = self.write_scenario(data)
+        out = self.root / "overflow-artifacts"
+        rejected = run_cli(scenario_path, out, "--state-path", str(state))
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("not finite", rejected.stderr)
+        self.assertFalse((out / data["scenario_id"]).exists())
+
+        scenario = BacktestScenario.from_dict(sample_data())
+        result = BacktestEngine(scenario).run()
+        result.summary["final_equity"] = float("inf")
+        with self.assertRaises(ValueError):
+            ArtifactWriter(str(out), trusted_override=True).write_all(scenario, result)
+        self.assertFalse((out / scenario.scenario_id).exists())
+
+    def test_diagnostic_labels_reject_controls_and_unbounded_values(self):
+        for field in ("lake1_env", "world_model"):
+            for bad in ("safe\nForged: pass", "safe\x1b]0;forged\x07", "x" * 65):
+                data = sample_data()
+                data[field] = bad
+                with self.subTest(field=field, bad=bad), self.assertRaises(ValueError):
+                    BacktestScenario.from_dict(data)
+
+    def test_fifo_inputs_fail_before_blocking(self):
+        scenario_fifo = self.root / "scenario.fifo"
+        state_fifo = self.root / "state.fifo"
+        os.mkfifo(scenario_fifo)
+        os.mkfifo(state_fifo)
+        scenario_rejected = run_cli(scenario_fifo, self.root / "fifo-scenario-artifacts")
+        self.assertNotEqual(scenario_rejected.returncode, 0)
+        self.assertIn("regular file", scenario_rejected.stderr)
+
+        data = sample_data()
+        scenario_path = self.write_scenario(data)
+        state_rejected = run_cli(scenario_path, self.root / "fifo-state-artifacts",
+                                 "--state-path", str(state_fifo))
+        self.assertNotEqual(state_rejected.returncode, 0)
+        self.assertIn("regular", state_rejected.stderr)
 
 
 if __name__ == "__main__":

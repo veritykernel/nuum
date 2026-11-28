@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import dataclasses
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import math
 from pathlib import Path
 import re
+import stat
 from typing import Dict, List, Optional, Any
 
 MAX_SCENARIO_BYTES = 256 * 1024
@@ -158,15 +160,19 @@ class BacktestScenario:
             strategies=strategies,
             risk=risk,
             fees=fees,
-            lake1_env=data.get("lake1_env", "studio1"),
-            world_model=data.get("world_model", "volatility"),
+            lake1_env=safe_component(data.get("lake1_env", "studio1"), "lake1_env"),
+            world_model=safe_component(data.get("world_model", "volatility"), "world_model"),
             artifacts_dir=str(Path(*artifact_parts)),
         )
 
     @staticmethod
     def load(path: str) -> "BacktestScenario":
         p = Path(path)
-        with p.open("rb") as source:
+        source_fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(source_fd, "rb") as source:
+            status = os.fstat(source.fileno())
+            if not stat.S_ISREG(status.st_mode):
+                raise ValueError("scenario must be a regular file")
             raw = source.read(MAX_SCENARIO_BYTES + 1)
         if len(raw) > MAX_SCENARIO_BYTES:
             raise ValueError("scenario exceeds size limit")
@@ -194,7 +200,8 @@ class BacktestScenario:
         }
 
     def dump(self, path: str) -> None:
+        rendered = json.dumps(self.to_dict(), indent=2, sort_keys=True, allow_nan=False)
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=2, sort_keys=True)
+            f.write(rendered)

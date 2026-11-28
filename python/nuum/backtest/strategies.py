@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from dataclasses import dataclass
+import math
 from typing import Dict, List, Any
 from datetime import datetime
 
@@ -37,9 +38,13 @@ class BaseStrategy:
         for pos in self.positions.values():
             price = prices.get(pos.symbol, pos.avg_price)
             pnl += pos.qty * (price - pos.avg_price)
+            if not math.isfinite(pnl):
+                raise ValueError("backtest position value is not finite")
         return pnl
 
     def _trade(self, ts: datetime, symbol: str, qty: float, price: float) -> None:
+        if not math.isfinite(qty) or not math.isfinite(price):
+            raise ValueError("backtest trade value is not finite")
         if qty == 0:
             return
         pos = self.positions.get(symbol)
@@ -47,10 +52,14 @@ class BaseStrategy:
             self.positions[symbol] = Position(symbol=symbol, qty=qty, avg_price=price)
         else:
             new_qty = pos.qty + qty
+            if not math.isfinite(new_qty):
+                raise ValueError("backtest position quantity is not finite")
             if new_qty == 0:
                 self.positions.pop(symbol, None)
             else:
                 new_avg = (pos.avg_price * pos.qty + price * qty) / new_qty
+                if not math.isfinite(new_avg):
+                    raise ValueError("backtest average price is not finite")
                 pos.qty = new_qty
                 pos.avg_price = new_avg
         self.trades.append(Trade(ts=ts, symbol=symbol, qty=qty, price=price, strategy_id=self.strategy_id))
