@@ -49,7 +49,7 @@ def main(argv=None):
     paths = writer.write_all(scenario, result)
 
     if args.print_summary:
-        print(json.dumps(result.summary, indent=2, sort_keys=True))
+        print(json.dumps(result.summary, indent=2, sort_keys=True, allow_nan=False))
 
     sys.stderr.write(f"Artifacts written under: {paths['summary']}\n")
 

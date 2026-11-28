@@ -31,4 +31,6 @@ cli/backtest/nuum_backtest_run.sh --scenario config/backtest/sample_scenario_vol
 
 Scenario IDs are one safe path component. Scenario files are limited to 256 KiB, seven days, 16 symbols, and eight strategies. A run accepts at most 20,000 bars and 50,000 trades; a JSONL state file is limited to 8 MiB, 16 KiB per line, and 20,000 records. An explicit state file requires `--state-path FILE`; a path embedded in scenario JSON alone does not authorize reading it.
 
+Scenario and state inputs must be regular files; FIFOs and symlinks are rejected before reading. Diagnostic `lake1_env` and `world_model` labels must be short safe components. Nonfinite arithmetic or JSON values fail the run before artifact creation, and artifact JSON serialization rejects `NaN` and `Infinity`.
+
 Scenario-selected artifact roots stay under the current directory's `artifacts/` tree. Every component is opened without following symlinks, so an intermediate redirect cannot move writes outside that tree. An explicit `--artifacts-dir` is a separate trusted operator choice; its selected destination is canonicalized before opening. Artifact runs create a fresh private scenario directory and refuse to overwrite an existing one. Choose a new output root or remove a prior run under its data-retention authority. These demo backtests are not live trading or market-data acceptance.
